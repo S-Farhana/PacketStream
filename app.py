@@ -4,12 +4,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import time
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 import json
 from datetime import datetime
 import warnings
 import streamlit as st
 from PIL import Image
+import socket
+import os
 
 warnings.filterwarnings('ignore')
 plt.switch_backend('Agg')
@@ -31,12 +33,16 @@ class NetworkConnectionAnalyzer:
         self.monitoring = False
         self.stats = defaultdict(int)
         self.prev_connections = set()
-        
+        self.traffic_data = defaultdict(lambda: deque(maxlen=10))  # Rolling window for packets/bytes
+        self.process_trends = defaultdict(lambda: {'cpu': deque(maxlen=10), 'memory': deque(maxlen=10)})  # Rolling averages
+        self.connection_start_times = {}  # Track start time per connection
+
     def monitor_connections(self, interval=2):
         self.monitoring = True
 
         while self.monitoring:
-            timestamp = time.time()
+            current_time = time.time()
+            timestamp = current_time
             
             try:
                 connections = psutil.net_connections(kind='inet')
@@ -59,11 +65,18 @@ class NetworkConnectionAnalyzer:
                         current_connections.add(conn_tuple)
 
                         if conn_tuple not in self.prev_connections:
-                            conn_data = self._extract_connection_info(conn, timestamp)
+                            conn_data = self._extract_connection_info(conn, timestamp, current_time)
                             if conn_data:
                                 self.connections_data.append(conn_data)
                                 self._update_stats(conn_data)
                                 new_connections.append(conn_data)
+                                self._update_traffic_data(conn_data)
+                                self.connection_start_times[conn_tuple] = timestamp
+                        else:
+                            # Update duration for existing connections
+                            for data in self.connections_data:
+                                if (data['local_ip'], data['local_port'], data['remote_ip'], data['remote_port'], data['pid']) == conn_tuple:
+                                    data['duration_seconds'] = current_time - self.connection_start_times[conn_tuple]
 
                 except:
                     continue
@@ -80,21 +93,25 @@ class NetworkConnectionAnalyzer:
 
     def _capture_snapshot(self):
         try:
+            current_time = time.time()
             connections = psutil.net_connections(kind='inet')
-            timestamp = time.time()
+            timestamp = current_time
             
             for conn in connections:
                 try:
-                    conn_data = self._extract_connection_info(conn, timestamp)
+                    conn_data = self._extract_connection_info(conn, timestamp, current_time)
                     if conn_data:
                         self.connections_data.append(conn_data)
                         self._update_stats(conn_data)
+                        self._update_traffic_data(conn_data)
+                        conn_tuple = (conn_data['local_ip'], conn_data['local_port'], conn_data['remote_ip'], conn_data['remote_port'], conn_data['pid'])
+                        self.connection_start_times[conn_tuple] = timestamp
                 except:
                     continue
         except:
             pass
     
-    def _extract_connection_info(self, conn, timestamp):
+    def _extract_connection_info(self, conn, timestamp, current_time):
         if conn.laddr:
             local_ip = conn.laddr.ip
             local_port = conn.laddr.port
@@ -113,17 +130,42 @@ class NetworkConnectionAnalyzer:
         pid = 0
         process_memory = 0.0
         process_cpu = 0.0
+        process_start_time = 0.0
+        username = 'Unknown'
+        process_path = 'Unknown'
+        remote_hostname = 'Unknown'
+        duration = 0.0
+        tcp_flags = 'Unknown'
+        
         try:
             if conn.pid:
                 process = psutil.Process(conn.pid)
                 process_name = process.name()
                 pid = conn.pid
                 process_memory = process.memory_info().rss / (1024 * 1024)  # MB
-                process_cpu = process.cpu_percent(interval=0.01)
+                process_cpu = process.cpu_percent(interval=0.1) if process.is_running() else 0.0  # Increased interval
+                process_start_time = process.create_time()
+                username = process.username() if hasattr(process, 'username') else 'Unknown'
+                process_path = process.exe() if hasattr(process, 'exe') else 'Unknown'
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
         
         protocol = 'TCP' if conn.type == 1 else 'UDP' if conn.type == 2 else 'Unknown'
+        
+        try:
+            if remote_ip != 'Unknown':
+                remote_hostname = socket.gethostbyaddr(remote_ip)[0] if socket.gethostbyaddr(remote_ip) else 'Unknown'
+        except (socket.herror, socket.gaierror):
+            remote_hostname = 'Unknown'
+        
+        conn_tuple = (local_ip, local_port, remote_ip, remote_port, pid)
+        duration = current_time - self.connection_start_times.get(conn_tuple, timestamp) if conn_tuple in self.connection_start_times else 0.0
+        
+        try:
+            if conn.status == 'ESTABLISHED' and conn.raddr:
+                tcp_flags = self._get_tcp_flags(conn)
+        except:
+            tcp_flags = 'Unknown'
         
         return {
             'timestamp': timestamp,
@@ -137,8 +179,31 @@ class NetworkConnectionAnalyzer:
             'pid': pid,
             'direction': self._determine_direction(local_ip, remote_ip),
             'process_memory_mb': process_memory,
-            'process_cpu_percent': process_cpu
+            'process_cpu_percent': process_cpu,
+            'remote_hostname': remote_hostname,
+            'duration_seconds': duration,
+            'tcp_flags': tcp_flags,
+            'process_start_time': process_start_time,
+            'username': username,
+            'process_path': process_path
         }
+    
+    def _get_tcp_flags(self, conn):
+        flags = 'Unknown'
+        try:
+            if conn.status == 'SYN_SENT':
+                flags = 'SYN'
+            elif conn.status == 'ESTABLISHED':
+                flags = 'ACK'
+            elif conn.status in ['FIN_WAIT1', 'FIN_WAIT2', 'CLOSE_WAIT', 'LAST_ACK']:
+                flags = 'FIN'
+            elif conn.status == 'LISTEN':
+                flags = 'LISTEN'
+            elif conn.status in ['TIME_WAIT', 'CLOSE']:
+                flags = 'FIN,ACK'
+        except:
+            pass
+        return flags
     
     def _determine_direction(self, local_ip, remote_ip):
         if local_ip == 'Unknown' or remote_ip == 'Unknown':
@@ -175,6 +240,13 @@ class NetworkConnectionAnalyzer:
         self.stats[f"direction_{conn_data['direction']}"] += 1
         self.stats[f"process_{conn_data['process']}"] += 1
     
+    def _update_traffic_data(self, conn_data):
+        conn_key = (conn_data['local_ip'], conn_data['local_port'], conn_data['remote_ip'], conn_data['remote_port'])
+        # Simulated packets/bytes (replace with actual network stats if available)
+        packets = 10  # Placeholder
+        bytes_sent = 1024  # Placeholder
+        self.traffic_data[conn_key].append({'packets': packets, 'bytes': bytes_sent})
+    
     def analyze_connections(self):
         if not self.connections_data:
             return None, None
@@ -197,8 +269,15 @@ class NetworkConnectionAnalyzer:
             'port_categories': self._categorize_ports(df),
             'top_local_ports': df['local_port'].value_counts().head(10),
             'avg_process_memory': df.groupby('process')['process_memory_mb'].mean().sort_values(ascending=False).head(10),
-            'avg_process_cpu': df.groupby('process')['process_cpu_percent'].mean().sort_values(ascending=False).head(10)
+            'avg_process_cpu': df.groupby('process')['process_cpu_percent'].mean().sort_values(ascending=False).head(10),
+            'traffic_by_protocol': self._calculate_traffic_by_protocol(df),
+            'traffic_spikes': self._detect_traffic_spikes(df)
         }
+        
+        # Update process trends
+        for _, row in df.iterrows():
+            self.process_trends[row['process']]['cpu'].append(row['process_cpu_percent'])
+            self.process_trends[row['process']]['memory'].append(row['process_memory_mb'])
         
         return analysis, df
     
@@ -232,6 +311,25 @@ class NetworkConnectionAnalyzer:
                 port_categories['Unknown'] += 1
         
         return dict(port_categories)
+    
+    def _calculate_traffic_by_protocol(self, df):
+        traffic = defaultdict(int)
+        for _, row in df.iterrows():
+            conn_key = (row['local_ip'], row['local_port'], row['remote_ip'], row['remote_port'])
+            if conn_key in self.traffic_data:
+                total_bytes = sum(entry['bytes'] for entry in self.traffic_data[conn_key])
+                traffic[row['protocol']] += total_bytes
+        return dict(traffic)
+    
+    def _detect_traffic_spikes(self, df):
+        spikes = {}
+        for _, row in df.iterrows():
+            conn_key = (row['local_ip'], row['local_port'], row['remote_ip'], row['remote_port'])
+            if conn_key in self.traffic_data:
+                bytes_list = [entry['bytes'] for entry in self.traffic_data[conn_key]]
+                if bytes_list and max(bytes_list) > 5 * sum(bytes_list) / len(bytes_list) if len(bytes_list) > 1 else 0:
+                    spikes[conn_key] = max(bytes_list)
+        return spikes
     
     def create_visualizations(self, analysis, df):
         visualizations = {}
@@ -314,7 +412,6 @@ class NetworkConnectionAnalyzer:
             else:
                 axes_top[1,0].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
-            
             if not analysis['top_local_ports'].empty:
                 local_ports = analysis['top_local_ports'].head(10)
                 sns.barplot(x=local_ports.values, y=local_ports.index.astype(str), ax=axes_top[1,1], orient='h')
@@ -380,7 +477,6 @@ class NetworkConnectionAnalyzer:
             else:
                 axes_resource[0].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
-
             if not analysis['avg_process_cpu'].empty:
                 cpu = analysis['avg_process_cpu'].head(8)
                 sns.barplot(x=cpu.values, y=cpu.index, ax=axes_resource[1], orient='h')
@@ -422,19 +518,21 @@ class NetworkConnectionAnalyzer:
             'network_behavior': {
                 'protocol_breakdown': analysis['protocol_distribution'].to_dict(),
                 'direction_breakdown': analysis['direction_distribution'].to_dict(),
-                'status_breakdown': analysis['status_distribution'].to_dict()
+                'status_breakdown': analysis['status_distribution'].to_dict(),
+                'traffic_by_protocol': analysis['traffic_by_protocol']
             },
-            'security_insights': self._security_analysis(df),
+            'security_insights': self._security_analysis(df, analysis),
             'top_communicators': {
                 'processes': analysis['top_processes'].head(5).to_dict(),
                 'remote_ips': analysis['top_remote_ips'].head(5).to_dict(),
                 'avg_memory': analysis['avg_process_memory'].head(5).to_dict(),
                 'avg_cpu': analysis['avg_process_cpu'].head(5).to_dict()
-            }
+            },
+            'traffic_spikes': analysis['traffic_spikes']
         }
         return report
     
-    def _security_analysis(self, df):
+    def _security_analysis(self, df, analysis):
         insights = []
         
         try:
@@ -465,6 +563,9 @@ class NetworkConnectionAnalyzer:
             high_resource_processes = df[df['process_cpu_percent'] > 50]['process'].unique()
             if len(high_resource_processes) > 0:
                 insights.append(f"High CPU processes: {', '.join(high_resource_processes)} - investigate for mining or attacks.")
+            
+            if analysis['traffic_spikes']:
+                insights.append(f"Traffic spikes detected: {len(analysis['traffic_spikes'])} connections with unusual activity.")
         except:
             pass
         
@@ -561,7 +662,6 @@ def apply_sidebar_and_background_style(bg_path="background.png"):
     """
 
     st.markdown(css, unsafe_allow_html=True)
-
 
 
 def run_app():
@@ -673,6 +773,8 @@ def run_app():
         - Export to CSV for further analysis.
         """)
         if df is not None:
+            # Convert process_start_time to readable format
+            df['process_start_time'] = pd.to_datetime(df['process_start_time'], unit='s').dt.strftime('%Y-%m-%d %H:%M:%S')
             st.dataframe(df, use_container_width=True)
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("Download CSV", csv, "network_connections.csv", "text/csv")
@@ -683,14 +785,13 @@ def run_app():
         Structured summary of key metrics and behaviors:
         - **Summary**: Overall statistics.
         - **Top Communicators**: Highest activity entities.
-        - **Network Behavior**: Breakdowns of protocols, directions, and statuses.
+        - **Network Behavior**: Breakdowns of protocols, directions, statuses, and traffic.
         - Download the full report as JSON.
         """)
         report = st.session_state.analyzer.generate_report(analysis, df)
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("Summary")
-            
             summary = report.get('summary')
             if summary:
                 for key, value in summary.items():
@@ -699,7 +800,6 @@ def run_app():
                 st.warning("No summary available in the report.")
 
         top_communicators = report.get('top_communicators')
-
         if top_communicators:
             with col2:
                 st.subheader("Top Communicators")
@@ -722,10 +822,14 @@ def run_app():
                     for item, count in data.items():
                         st.write(f"- {item}: {count}")
         
+        if report.get('traffic_spikes'):
+            st.subheader("Traffic Spikes")
+            for conn_key, bytes_val in report['traffic_spikes'].items():
+                st.write(f"- Connection {conn_key}: {bytes_val} bytes")
+
         json_report = json.dumps(report, indent=2, default=str)
         st.download_button("Download JSON Report", json_report, "network_report.json", "application/json")
     
-
     with tabs[3]:
         st.header("Security Insights")
         st.markdown("""
@@ -735,6 +839,7 @@ def run_app():
         - **Unusual Ports**: Non-standard services.
         - **Listening Services**: Potential entry points.
         - **High Resources**: Suspicious activity.
+        - **Traffic Spikes**: Unusual traffic patterns.
         """)
         security_insights = report.get('security_insights')
 
