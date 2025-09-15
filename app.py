@@ -12,6 +12,10 @@ import streamlit as st
 from PIL import Image
 import socket
 import os
+import altair as alt
+import numpy as np
+import uuid
+import base64
 
 warnings.filterwarnings('ignore')
 plt.switch_backend('Agg')
@@ -36,6 +40,7 @@ class NetworkConnectionAnalyzer:
         self.traffic_data = defaultdict(lambda: deque(maxlen=10))  # Rolling window for packets/bytes
         self.process_trends = defaultdict(lambda: {'cpu': deque(maxlen=10), 'memory': deque(maxlen=10)})  # Rolling averages
         self.connection_start_times = {}  # Track start time per connection
+        self.bandwidth_data = defaultdict(lambda: deque(maxlen=10))  # Rolling window for bandwidth
 
     def monitor_connections(self, interval=2):
         self.monitoring = True
@@ -136,6 +141,8 @@ class NetworkConnectionAnalyzer:
         remote_hostname = 'Unknown'
         duration = 0.0
         tcp_flags = 'Unknown'
+        bytes_sent = 0
+        bytes_received = 0
         
         try:
             if conn.pid:
@@ -143,10 +150,13 @@ class NetworkConnectionAnalyzer:
                 process_name = process.name()
                 pid = conn.pid
                 process_memory = process.memory_info().rss / (1024 * 1024)  # MB
-                process_cpu = process.cpu_percent(interval=0.1) if process.is_running() else 0.0  # Increased interval
+                process_cpu = process.cpu_percent(interval=0.1) if process.is_running() else 0.0
                 process_start_time = process.create_time()
                 username = process.username() if hasattr(process, 'username') else 'Unknown'
                 process_path = process.exe() if hasattr(process, 'exe') else 'Unknown'
+                # Simulate bandwidth data
+                bytes_sent = 1024
+                bytes_received = 512
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
         
@@ -185,7 +195,9 @@ class NetworkConnectionAnalyzer:
             'tcp_flags': tcp_flags,
             'process_start_time': process_start_time,
             'username': username,
-            'process_path': process_path
+            'process_path': process_path,
+            'bytes_sent': bytes_sent,
+            'bytes_received': bytes_received
         }
     
     def _get_tcp_flags(self, conn):
@@ -242,18 +254,21 @@ class NetworkConnectionAnalyzer:
     
     def _update_traffic_data(self, conn_data):
         conn_key = (conn_data['local_ip'], conn_data['local_port'], conn_data['remote_ip'], conn_data['remote_port'])
-        # Simulated packets/bytes (replace with actual network stats if available)
-        packets = 10  # Placeholder
-        bytes_sent = 1024  # Placeholder
+        packets = 10
+        bytes_sent = conn_data['bytes_sent']
+        bytes_received = conn_data['bytes_received']
         self.traffic_data[conn_key].append({'packets': packets, 'bytes': bytes_sent})
+        self.bandwidth_data[conn_data['process']].append({
+            'timestamp': conn_data['timestamp'],
+            'bytes_sent': bytes_sent,
+            'bytes_received': bytes_received
+        })
     
     def analyze_connections(self):
         if not self.connections_data:
             return None, None
         
         df = pd.DataFrame(self.connections_data)
-        
-        # Remove duplicates
         df = df.drop_duplicates(subset=['local_ip', 'local_port', 'remote_ip', 'remote_port', 'process'])
         
         if len(df) == 0:
@@ -271,10 +286,10 @@ class NetworkConnectionAnalyzer:
             'avg_process_memory': df.groupby('process')['process_memory_mb'].mean().sort_values(ascending=False).head(10),
             'avg_process_cpu': df.groupby('process')['process_cpu_percent'].mean().sort_values(ascending=False).head(10),
             'traffic_by_protocol': self._calculate_traffic_by_protocol(df),
-            'traffic_spikes': self._detect_traffic_spikes(df)
+            'traffic_spikes': self._detect_traffic_spikes(df),
+            'known_vs_unknown_ports': self._known_vs_unknown_ports(df)
         }
         
-        # Update process trends
         for _, row in df.iterrows():
             self.process_trends[row['process']]['cpu'].append(row['process_cpu_percent'])
             self.process_trends[row['process']]['memory'].append(row['process_memory_mb'])
@@ -312,6 +327,12 @@ class NetworkConnectionAnalyzer:
         
         return dict(port_categories)
     
+    def _known_vs_unknown_ports(self, df):
+        known_ports = {80, 443, 21, 22, 23, 25, 53, 67, 110, 143, 993, 995, 8080, 3389, 5432, 3306, 1433, 6379}
+        known_count = len(df[df['remote_port'].isin(known_ports)])
+        unknown_count = len(df[~df['remote_port'].isin(known_ports) & (df['remote_port'] != 0) & (df['remote_port'] != 'Unknown')])
+        return {'Known Ports': known_count, 'Unknown Ports': unknown_count}
+    
     def _calculate_traffic_by_protocol(self, df):
         traffic = defaultdict(int)
         for _, row in df.iterrows():
@@ -334,62 +355,76 @@ class NetworkConnectionAnalyzer:
     def create_visualizations(self, analysis, df):
         visualizations = {}
         try:
-            fig_dist, axes_dist = plt.subplots(1, 3, figsize=(24, 8))
+            # Existing Distributions
+            fig_dist, axes_dist = plt.subplots(2, 2, figsize=(24, 16))
             fig_dist.suptitle('Network Distributions', fontsize=18, fontweight='bold')
             
             if not analysis['protocol_distribution'].empty:
-                axes_dist[0].pie(analysis['protocol_distribution'].values, labels=analysis['protocol_distribution'].index, 
+                axes_dist[0,0].pie(analysis['protocol_distribution'].values, labels=analysis['protocol_distribution'].index, 
                                  autopct='%1.1f%%', startangle=90, shadow=True, textprops={'fontsize': 12})
-                axes_dist[0].set_title('Protocol Distribution', fontsize=14)
+                axes_dist[0,0].set_title('Protocol Distribution', fontsize=14)
             else:
-                axes_dist[0].text(0.5, 0.5, 'No Data', ha='center', va='center')
+                axes_dist[0,0].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
             if not analysis['status_distribution'].empty:
-                sns.barplot(x=analysis['status_distribution'].index, y=analysis['status_distribution'].values, ax=axes_dist[1])
-                axes_dist[1].set_title('Connection Status', fontsize=14)
-                axes_dist[1].set_xlabel('Status')
-                axes_dist[1].set_ylabel('Count')
-                axes_dist[1].tick_params(axis='x', rotation=45)
-                for p in axes_dist[1].patches:
-                    axes_dist[1].annotate(f'{int(p.get_height())}', (p.get_x() + p.get_width() / 2., p.get_height()), 
+                sns.barplot(x=analysis['status_distribution'].index, y=analysis['status_distribution'].values, ax=axes_dist[0,1])
+                axes_dist[0,1].set_title('Connection Status', fontsize=14)
+                axes_dist[0,1].set_xlabel('Status')
+                axes_dist[0,1].set_ylabel('Count')
+                axes_dist[0,1].tick_params(axis='x', rotation=45)
+                for p in axes_dist[0,1].patches:
+                    axes_dist[0,1].annotate(f'{int(p.get_height())}', (p.get_x() + p.get_width() / 2., p.get_height()), 
                                           ha='center', va='center', xytext=(0, 5), textcoords='offset points')
             else:
-                axes_dist[1].text(0.5, 0.5, 'No Data', ha='center', va='center')
+                axes_dist[0,1].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
             if not analysis['direction_distribution'].empty:
-                axes_dist[2].pie(analysis['direction_distribution'].values, labels=analysis['direction_distribution'].index, 
+                axes_dist[1,0].pie(analysis['direction_distribution'].values, labels=analysis['direction_distribution'].index, 
                                  autopct='%1.1f%%', startangle=90, shadow=True, textprops={'fontsize': 12})
-                axes_dist[2].set_title('Traffic Direction', fontsize=14)
+                axes_dist[1,0].set_title('Traffic Direction', fontsize=14)
             else:
-                axes_dist[2].text(0.5, 0.5, 'No Data', ha='center', va='center')
+                axes_dist[1,0].text(0.5, 0.5, 'No Data', ha='center', va='center')
+            
+            if analysis['known_vs_unknown_ports']:
+                known_unknown = pd.Series(analysis['known_vs_unknown_ports'])
+                axes_dist[1,1].pie(known_unknown.values, labels=known_unknown.index, 
+                                 autopct='%1.1f%%', startangle=90, shadow=True, textprops={'fontsize': 12})
+                axes_dist[1,1].set_title('Known vs Unknown Ports', fontsize=14)
+            else:
+                axes_dist[1,1].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['distributions'] = fig_dist
 
+            # Existing Top Entities
             fig_top, axes_top = plt.subplots(2, 3, figsize=(24, 16))
             fig_top.suptitle('Top Network Entities', fontsize=18, fontweight='bold')
             
             if not analysis['top_processes'].empty:
                 top_processes = analysis['top_processes'].head(8)
-                sns.barplot(x=top_processes.values, y=top_processes.index, ax=axes_top[0,0], orient='h')
-                axes_top[0,0].set_title('Top 8 Processes by Connections', fontsize=14)
-                axes_top[0,0].set_xlabel('Count')
-                axes_top[0,0].set_ylabel('Process')
-                for p in axes_top[0,0].patches:
-                    axes_top[0,0].annotate(f'{int(p.get_width())}', (p.get_width(), p.get_y() + p.get_height() / 2.), 
-                                           xytext=(5, 0), textcoords='offset points', ha='left', va='center')
+                chart_data = pd.DataFrame({'Process': top_processes.index, 'Count': top_processes.values})
+                chart = alt.Chart(chart_data).mark_bar().encode(
+                    x=alt.X('Count:Q', title='Count'),
+                    y=alt.Y('Process:N', title='Process', sort=None),
+                    tooltip=['Process', 'Count']
+                ).properties(
+                    title='Top 8 Processes by Connections'
+                )
+                visualizations['top_processes'] = chart
             else:
                 axes_top[0,0].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
             if not analysis['top_remote_ips'].empty:
                 top_ips = analysis['top_remote_ips'].head(8)
-                sns.barplot(x=top_ips.values, y=top_ips.index, ax=axes_top[0,1], orient='h')
-                axes_top[0,1].set_title('Top Remote IPs', fontsize=14)
-                axes_top[0,1].set_xlabel('Count')
-                axes_top[0,1].set_ylabel('IP')
-                for p in axes_top[0,1].patches:
-                    axes_top[0,1].annotate(f'{int(p.get_width())}', (p.get_width(), p.get_y() + p.get_height() / 2.), 
-                                           xytext=(5, 0), textcoords='offset points', ha='left', va='center')
+                chart_data = pd.DataFrame({'IP': top_ips.index, 'Count': top_ips.values})
+                chart = alt.Chart(chart_data).mark_bar().encode(
+                    x=alt.X('Count:Q', title='Count'),
+                    y=alt.Y('IP:N', title='IP', sort=None),
+                    tooltip=['IP', 'Count']
+                ).properties(
+                    title='Top Remote IPs'
+                )
+                visualizations['top_remote_ips'] = chart
             else:
                 axes_top[0,1].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
@@ -429,6 +464,7 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['top_entities'] = fig_top
 
+            # Existing Timeline
             fig_time, axes_time = plt.subplots(1, 2, figsize=(24, 8))
             fig_time.suptitle('Timeline and Cross-Analysis', fontsize=18, fontweight='bold')
             
@@ -462,6 +498,7 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['timeline'] = fig_time
 
+            # Existing Resources
             fig_resource, axes_resource = plt.subplots(1, 2, figsize=(24, 8))
             fig_resource.suptitle('Resource Usage by Processes', fontsize=18, fontweight='bold')
             
@@ -492,6 +529,117 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['resources'] = fig_resource
 
+            # New Bandwidth Usage
+            fig_bandwidth, axes_bandwidth = plt.subplots(1, 2, figsize=(24, 8))
+            fig_bandwidth.suptitle('Bandwidth Usage Analysis', fontsize=18, fontweight='bold')
+            
+            bandwidth_df = pd.DataFrame()
+            for process, data in self.bandwidth_data.items():
+                for entry in data:
+                    bandwidth_df = pd.concat([bandwidth_df, pd.DataFrame({
+                        'process': [process],
+                        'timestamp': [entry['timestamp']],
+                        'bytes_sent': [entry['bytes_sent']],
+                        'bytes_received': [entry['bytes_received']]
+                    })], ignore_index=True)
+            
+            if not bandwidth_df.empty:
+                bandwidth_df['datetime'] = pd.to_datetime(bandwidth_df['timestamp'], unit='s')
+                top_processes = df['process'].value_counts().head(5).index
+                filtered_bandwidth = bandwidth_df[bandwidth_df['process'].isin(top_processes)]
+                if not filtered_bandwidth.empty:
+                    sns.lineplot(data=filtered_bandwidth, x='datetime', y='bytes_sent', hue='process', marker='o', ax=axes_bandwidth[0])
+                    axes_bandwidth[0].set_title('Top Processes by Bandwidth Usage Over Time', fontsize=14)
+                    axes_bandwidth[0].set_xlabel('Time')
+                    axes_bandwidth[0].set_ylabel('Bytes Sent')
+                    axes_bandwidth[0].tick_params(axis='x', rotation=45)
+                
+                heatmap_data = bandwidth_df.groupby('process').agg({'bytes_sent': 'sum', 'bytes_received': 'sum'}).reset_index()
+                if not heatmap_data.empty:
+                    heatmap_data = heatmap_data.pivot_table(index='process', values=['bytes_sent', 'bytes_received'], aggfunc='sum')
+                    sns.heatmap(heatmap_data, annot=True, fmt='.0f', cmap='YlOrRd', ax=axes_bandwidth[1])
+                    axes_bandwidth[1].set_title('Bytes Sent vs Received per Process', fontsize=14)
+            else:
+                axes_bandwidth[0].text(0.5, 0.5, 'No Data', ha='center', va='center')
+                axes_bandwidth[1].text(0.5, 0.5, 'No Data', ha='center', va='center')
+            
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            visualizations['bandwidth'] = fig_bandwidth
+
+            # New Connection Anomalies
+            fig_anomalies, ax_anomalies = plt.subplots(figsize=(12, 8))
+            known_ports = {80, 443, 21, 22, 23, 25, 53, 67, 110, 143, 993, 995, 8080, 3389, 5432, 3306, 1433, 6379}
+            df['is_unusual_port'] = ~df['remote_port'].isin(known_ports) & (df['remote_port'] != 0) & (df['remote_port'] != 'Unknown')
+            anomaly_data = df.groupby('remote_ip').agg({
+                'remote_ip': 'count',
+                'is_unusual_port': 'sum'
+            }).rename(columns={'remote_ip': 'connection_count'}).reset_index()
+            
+            if not anomaly_data.empty:
+                scatter = ax_anomalies.scatter(
+                    anomaly_data['connection_count'], 
+                    anomaly_data['is_unusual_port'], 
+                    s=100, alpha=0.6
+                )
+                ax_anomalies.set_title('Remote IPs: Connection Frequency vs Unusual Ports', fontsize=14)
+                ax_anomalies.set_xlabel('Connection Count')
+                ax_anomalies.set_ylabel('Unusual Port Count')
+                
+                # Highlight top 5 outliers
+                top_outliers = anomaly_data.nlargest(5, ['connection_count', 'is_unusual_port'])
+                for _, row in top_outliers.iterrows():
+                    ax_anomalies.annotate(
+                        row['remote_ip'], 
+                        (row['connection_count'], row['is_unusual_port']),
+                        xytext=(5, 5), textcoords='offset points', fontsize=10, color='red'
+                    )
+            else:
+                ax_anomalies.text(0.5, 0.5, 'No Data', ha='center', va='center')
+            
+            plt.tight_layout()
+            visualizations['anomalies'] = fig_anomalies
+
+            # New Process Activity Trends
+            fig_trends, axes_trends = plt.subplots(2, 1, figsize=(24, 16))
+            fig_trends.suptitle('Process Activity Trends', fontsize=18, fontweight='bold')
+            
+            trend_df = pd.DataFrame()
+            for process, trends in self.process_trends.items():
+                for i, (cpu, mem) in enumerate(zip(trends['cpu'], trends['memory'])):
+                    trend_df = pd.concat([trend_df, pd.DataFrame({
+                        'process': [process],
+                        'index': [i],
+                        'cpu': [cpu],
+                        'memory': [mem]
+                    })], ignore_index=True)
+            
+            if not trend_df.empty:
+                top_processes = df['process'].value_counts().head(5).index
+                filtered_trends = trend_df[trend_df['process'].isin(top_processes)]
+                if not filtered_trends.empty:
+                    sns.lineplot(data=filtered_trends, x='index', y='cpu', hue='process', marker='o', ax=axes_trends[0])
+                    axes_trends[0].set_title('Rolling Average CPU Usage for Top Processes', fontsize=14)
+                    axes_trends[0].set_xlabel('Time Index')
+                    axes_trends[0].set_ylabel('CPU (%)')
+                
+                # Stackplot for cumulative connections
+                if len(df) > 1:
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
+                    conn_timeline = df[df['process'].isin(top_processes)].groupby([df['datetime'].dt.floor('1Min'), 'process']).size().unstack(fill_value=0)
+                    if not conn_timeline.empty:
+                        axes_trends[1].stackplot(conn_timeline.index, conn_timeline.values.T, labels=conn_timeline.columns)
+                        axes_trends[1].set_title('Cumulative Connections by Process Over Time', fontsize=14)
+                        axes_trends[1].set_xlabel('Time')
+                        axes_trends[1].set_ylabel('Connections')
+                        axes_trends[1].legend(loc='upper left')
+                        axes_trends[1].tick_params(axis='x', rotation=45)
+            else:
+                axes_trends[0].text(0.5, 0.5, 'No Data', ha='center', va='center')
+                axes_trends[1].text(0.5, 0.5, 'No Data', ha='center', va='center')
+            
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            visualizations['trends'] = fig_trends
+
             return visualizations
         except Exception as e:
             print(f"Visualization error: {e}")
@@ -519,7 +667,8 @@ class NetworkConnectionAnalyzer:
                 'protocol_breakdown': analysis['protocol_distribution'].to_dict(),
                 'direction_breakdown': analysis['direction_distribution'].to_dict(),
                 'status_breakdown': analysis['status_distribution'].to_dict(),
-                'traffic_by_protocol': analysis['traffic_by_protocol']
+                'traffic_by_protocol': analysis['traffic_by_protocol'],
+                'known_vs_unknown_ports': analysis['known_vs_unknown_ports']
             },
             'security_insights': self._security_analysis(df, analysis),
             'top_communicators': {
@@ -574,9 +723,6 @@ class NetworkConnectionAnalyzer:
         
         return insights
 
-
-import base64, os, pathlib
-
 def apply_sidebar_and_background_style(bg_path="background.png"):
     if not os.path.exists(bg_path):
         st.warning(f"Background image not found at: {bg_path}")
@@ -588,7 +734,6 @@ def apply_sidebar_and_background_style(bg_path="background.png"):
 
     css = f"""
     <style>
-    /* remove block container paddings so background shows edge-to-edge */
     .block-container {{
         padding-top: 1rem;
         padding-right: 1rem;
@@ -610,15 +755,13 @@ def apply_sidebar_and_background_style(bg_path="background.png"):
     }}
 
     [data-testid="stSidebar"] .stSlider > div > div > div {{
-    background: #ffffff !important;  /* slider track */
+    background: #ffffff !important;
     }}
    
-    /* Make sidebar controls text white too */
     [data-testid="stSidebar"] * {{
         color: #000000 !important;
     }}
 
-    /* Buttons/inputs keep normal look but text white */
     [data-testid="stSidebar"] .stButton button,
     [data-testid="stSidebar"] .stNumberInput input,
     [data-testid="stSidebar"] .stSlider,
@@ -631,7 +774,7 @@ def apply_sidebar_and_background_style(bg_path="background.png"):
 
     [data-testid="stAppViewContainer"] [data-testid="stMain"] {{
         background-image: 
-            linear-gradient(rgba(255,255,255,0.25), rgba(255,255,255,0.25)),  /* white transparent overlay */
+            linear-gradient(rgba(255,255,255,0.25), rgba(255,255,255,0.25)),
             url("data:image/png;base64,{b64}");
         background-size: cover;
         background-position: center;
@@ -646,12 +789,11 @@ def apply_sidebar_and_background_style(bg_path="background.png"):
     }}
 
     .css-1q8dd3e, .stMarkdown a, .stRadio label, .stTabs [data-baseweb="tab"] {{
-        color: #ffffff !important;   /* make white */
+        color: #ffffff !important;
     }}
 
-    /* Active tab highlight background */
     .stTabs [data-baseweb="tab"][aria-selected="true"] {{
-        background-color: #003366 !important;  /* dark blue active tab */
+        background-color: #003366 !important;
         color: #ffffff !important;
     }}
 
@@ -662,7 +804,6 @@ def apply_sidebar_and_background_style(bg_path="background.png"):
     """
 
     st.markdown(css, unsafe_allow_html=True)
-
 
 def run_app():
     st.set_page_config(page_title="Live Network Analyzer", layout="wide")
@@ -733,13 +874,13 @@ def run_app():
         st.info("No data collected yet. Start monitoring or capture a snapshot.")
         return
     
-    tabs = st.tabs(["DASHBOARD", "RAW DATA", "REPORT", "SECURITY INSIGHTS"])
+    tabs = st.tabs(["DASHBOARD", "RAW DATA", "REPORT", "SECURITY INSIGHTS", "BANDWIDTH USAGE", "CONNECTION ANOMALIES", "PROCESS TRENDS"])
     
     with tabs[0]:
         st.header("Visual Dashboard")
         st.markdown("""
         This dashboard is divided into segregated sections for better understanding:
-        - **Distributions**: Breakdowns of protocols, statuses, and directions.
+        - **Distributions**: Breakdowns of protocols, statuses, directions, and known vs unknown ports.
         - **Top Entities**: Most active processes, IPs, and ports.
         - **Timeline & Cross-Analysis**: Time-based trends and relationships.
         - **Resource Usage**: CPU and memory consumption by processes.
@@ -749,11 +890,16 @@ def run_app():
         if vis:
             with st.expander("Distributions", expanded=True):
                 st.pyplot(vis['distributions'])
-                st.markdown("**Explanation**: These charts show the proportional breakdown of different network aspects for quick overview.")
+                st.markdown("**Explanation**: These charts show the proportional breakdown of different network aspects for quick overview, including known vs unknown ports.")
             
             with st.expander("Top Entities", expanded=True):
-                st.pyplot(vis['top_entities'])
-                st.markdown("**Explanation**: Highlights the most frequently occurring elements in your network traffic.")
+                if 'top_processes' in vis:
+                    st.altair_chart(vis['top_processes'], use_container_width=True)
+                else:
+                    st.pyplot(vis['top_entities'])
+                if 'top_remote_ips' in vis:
+                    st.altair_chart(vis['top_remote_ips'], use_container_width=True)
+                st.markdown("**Explanation**: Highlights the most frequently occurring elements in your network traffic with interactive tooltips.")
             
             with st.expander("Timeline & Cross-Analysis", expanded=True):
                 st.pyplot(vis['timeline'])
@@ -773,7 +919,6 @@ def run_app():
         - Export to CSV for further analysis.
         """)
         if df is not None:
-            # Convert process_start_time to readable format
             df['process_start_time'] = pd.to_datetime(df['process_start_time'], unit='s').dt.strftime('%Y-%m-%d %H:%M:%S')
             st.dataframe(df, use_container_width=True)
             csv = df.to_csv(index=False).encode('utf-8')
@@ -842,17 +987,51 @@ def run_app():
         - **Traffic Spikes**: Unusual traffic patterns.
         """)
         security_insights = report.get('security_insights')
-
         if security_insights:
             for insight in security_insights:
                 st.warning(insight)
         else:
             st.success("No issues detected.")
+    
+    with tabs[4]:
+        st.header("Bandwidth Usage")
+        st.markdown("""
+        Analysis of bandwidth consumption:
+        - **Bandwidth Over Time**: Tracks bytes sent by top processes.
+        - **Bytes Sent vs Received**: Heatmap showing data transfer per process.
+        """)
+        if vis and 'bandwidth' in vis:
+            st.pyplot(vis['bandwidth'])
+        else:
+            st.warning("No bandwidth data available.")
+    
+    with tabs[5]:
+        st.header("Connection Anomalies")
+        st.markdown("""
+        Identifies potential anomalies:
+        - **Remote IPs vs Unusual Ports**: Scatter plot highlighting IPs with high connection counts or unusual port usage.
+        - Outliers are annotated for easy identification.
+        """)
+        if vis and 'anomalies' in vis:
+            st.pyplot(vis['anomalies'])
+        else:
+            st.warning("No anomaly data available.")
+    
+    with tabs[6]:
+        st.header("Process Activity Trends")
+        st.markdown("""
+        Trends in process behavior:
+        - **Rolling Average CPU/Memory**: Tracks resource usage over time for top processes.
+        - **Cumulative Connections**: Stackplot of connection counts by process.
+        """)
+        if vis and 'trends' in vis:
+            st.pyplot(vis['trends'])
+        else:
+            st.warning("No trend data available.")
 
     if st.session_state.running:
         time.sleep(3)
         st.rerun()
-
 
 if __name__ == "__main__":
     run_app()
