@@ -14,7 +14,6 @@ import socket
 import os
 import altair as alt
 import numpy as np
-import uuid
 import base64
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
@@ -39,11 +38,11 @@ class NetworkConnectionAnalyzer:
         self.monitoring = False
         self.stats = defaultdict(int)
         self.prev_connections = set()
-        self.traffic_data = defaultdict(lambda: deque(maxlen=10))  # Rolling window for packets/bytes
-        self.process_trends = defaultdict(lambda: {'cpu': deque(maxlen=10), 'memory': deque(maxlen=10)})  # Rolling averages
-        self.connection_start_times = {}  # Track start time per connection
-        self.bandwidth_data = defaultdict(lambda: deque(maxlen=10))  # Rolling window for bandwidth
-        self.anomaly_scores = {}  # Store anomaly scores for connections
+        self.traffic_data = defaultdict(lambda: deque(maxlen=10))  
+        self.process_trends = defaultdict(lambda: {'cpu': deque(maxlen=10), 'memory': deque(maxlen=10)})  
+        self.connection_start_times = {} 
+        self.bandwidth_data = defaultdict(lambda: deque(maxlen=10)) 
+        self.anomaly_scores = {}  
 
     def monitor_connections(self, interval=2):
         self.monitoring = True
@@ -81,7 +80,7 @@ class NetworkConnectionAnalyzer:
                                 self._update_traffic_data(conn_data)
                                 self.connection_start_times[conn_tuple] = timestamp
                         else:
-                            # Update duration for existing connections
+                           
                             for data in self.connections_data:
                                 if (data['local_ip'], data['local_port'], data['remote_ip'], data['remote_port'], data['pid']) == conn_tuple:
                                     data['duration_seconds'] = current_time - self.connection_start_times[conn_tuple]
@@ -157,7 +156,6 @@ class NetworkConnectionAnalyzer:
                 process_start_time = process.create_time()
                 username = process.username() if hasattr(process, 'username') else 'Unknown'
                 process_path = process.exe() if hasattr(process, 'exe') else 'Unknown'
-                # Simulate bandwidth data
                 bytes_sent = 1024
                 bytes_received = 512
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -306,24 +304,19 @@ class NetworkConnectionAnalyzer:
         if len(df) < 2:
             return df
         
-        # Prepare features for ML-based anomaly detection
         features = ['duration_seconds', 'bytes_sent', 'bytes_received']
         df_features = df[features].fillna(0)
         
-        # Calculate port variety per process
         port_variety = df.groupby('process')['remote_port'].nunique().reset_index(name='port_variety')
         df = df.merge(port_variety, on='process', how='left')
         df_features['port_variety'] = df['port_variety'].fillna(0)
         
-        # Calculate remote IP frequency
         ip_freq = df['remote_ip'].value_counts().to_dict()
         df_features['ip_frequency'] = df['remote_ip'].map(ip_freq).fillna(1)
         
-        # Scale features
         scaler = StandardScaler()
         scaled_features = scaler.fit_transform(df_features)
         
-        # Apply Isolation Forest
         iso_forest = IsolationForest(contamination=0.1, random_state=42)
         df['anomaly_score'] = iso_forest.fit_predict(scaled_features)
         df['anomaly_score'] = np.where(df['anomaly_score'] == -1, 1, 0)  # 1 for anomalous, 0 for normal
@@ -389,7 +382,6 @@ class NetworkConnectionAnalyzer:
     def create_visualizations(self, analysis, df):
         visualizations = {}
         try:
-            # Existing Distributions
             fig_dist, axes_dist = plt.subplots(2, 2, figsize=(24, 16))
             fig_dist.suptitle('Network Distributions', fontsize=18, fontweight='bold')
             
@@ -430,7 +422,6 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['distributions'] = fig_dist
 
-            # Existing Top Entities
             fig_top, axes_top = plt.subplots(2, 3, figsize=(24, 16))
             fig_top.suptitle('Top Network Entities', fontsize=18, fontweight='bold')
             
@@ -498,7 +489,6 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['top_entities'] = fig_top
 
-            # Existing Timeline
             fig_time, axes_time = plt.subplots(1, 2, figsize=(24, 8))
             fig_time.suptitle('Timeline and Cross-Analysis', fontsize=18, fontweight='bold')
             
@@ -532,7 +522,6 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['timeline'] = fig_time
 
-            # Existing Resources
             fig_resource, axes_resource = plt.subplots(1, 2, figsize=(24, 8))
             fig_resource.suptitle('Resource Usage by Processes', fontsize=18, fontweight='bold')
             
@@ -563,7 +552,6 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['resources'] = fig_resource
 
-            # Existing Bandwidth Usage
             fig_bandwidth, axes_bandwidth = plt.subplots(1, 2, figsize=(24, 8))
             fig_bandwidth.suptitle('Bandwidth Usage Analysis', fontsize=18, fontweight='bold')
             
@@ -600,7 +588,6 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['bandwidth'] = fig_bandwidth
 
-            # Existing Connection Anomalies
             fig_anomalies, ax_anomalies = plt.subplots(figsize=(12, 8))
             known_ports = {80, 443, 21, 22, 23, 25, 53, 67, 110, 143, 993, 995, 8080, 3389, 5432, 3306, 1433, 6379}
             df['is_unusual_port'] = ~df['remote_port'].isin(known_ports) & (df['remote_port'] != 0) & (df['remote_port'] != 'Unknown')
@@ -619,7 +606,7 @@ class NetworkConnectionAnalyzer:
                 ax_anomalies.set_xlabel('Connection Count')
                 ax_anomalies.set_ylabel('Unusual Port Count')
                 
-                # Highlight top 5 outliers
+                # top 5 outliers
                 top_outliers = anomaly_data.nlargest(5, ['connection_count', 'is_unusual_port'])
                 for _, row in top_outliers.iterrows():
                     ax_anomalies.annotate(
@@ -633,17 +620,16 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout()
             visualizations['anomalies'] = fig_anomalies
 
-            # Updated Process Activity Trends
+            
             fig_trends, axes_trends = plt.subplots(2, 1, figsize=(24, 16))
             fig_trends.suptitle('Process Activity Trends', fontsize=18, fontweight='bold')
             
-            # Create trend_df from process_trends with timestamps
             trend_data = []
             for process, trends in self.process_trends.items():
                 cpu_data = list(trends['cpu'])
                 mem_data = list(trends['memory'])
-                if cpu_data or mem_data:  # Only include processes with data
-                    for i in range(len(cpu_data)):  # Use the length of cpu_data
+                if cpu_data or mem_data:  
+                    for i in range(len(cpu_data)): 
                         trend_data.append({
                             'process': process,
                             'index': i,
@@ -654,19 +640,18 @@ class NetworkConnectionAnalyzer:
             trend_df = pd.DataFrame(trend_data)
             
             if not trend_df.empty:
-                # Get top processes (up to 5) based on connection count, or all if fewer
+               
                 top_processes = df['process'].value_counts().head(5).index if not df['process'].value_counts().empty else trend_df['process'].unique()
                 filtered_trends = trend_df[trend_df['process'].isin(top_processes)]
                 
                 if not filtered_trends.empty:
-                    # Plot CPU usage
+                    
                     sns.lineplot(data=filtered_trends, x='index', y='cpu', hue='process', marker='o', ax=axes_trends[0])
                     axes_trends[0].set_title('Rolling Average CPU Usage for Top Processes', fontsize=14)
                     axes_trends[0].set_xlabel('Time Index (Measurements)')
                     axes_trends[0].set_ylabel('CPU (%)')
                     axes_trends[0].legend(title='Process', loc='upper right')
                 
-                    # Plot memory usage
                     sns.lineplot(data=filtered_trends, x='index', y='memory', hue='process', marker='o', ax=axes_trends[1])
                     axes_trends[1].set_title('Rolling Average Memory Usage for Top Processes', fontsize=14)
                     axes_trends[1].set_xlabel('Time Index (Measurements)')
@@ -682,11 +667,9 @@ class NetworkConnectionAnalyzer:
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['trends'] = fig_trends
 
-            # New Security Visualizations
             fig_security, axes_security = plt.subplots(2, 2, figsize=(24, 16))
             fig_security.suptitle('Security Analysis Visualizations', fontsize=18, fontweight='bold')
             
-            # Bar chart: Top 10 IPs by anomaly score
             if 'anomaly_score' in df.columns and not df[df['anomaly_score'] == 1].empty:
                 top_anomalous_ips = df[df['anomaly_score'] == 1][['remote_ip']].value_counts().head(10).reset_index(name='count')
                 sns.barplot(x='count', y='remote_ip', data=top_anomalous_ips, ax=axes_security[0, 0], orient='h')
@@ -700,7 +683,6 @@ class NetworkConnectionAnalyzer:
             else:
                 axes_security[0, 0].text(0.5, 0.5, 'No Anomaly Data', ha='center', va='center')
             
-            # Heatmap: Processes vs Ports
             if len(df) > 0:
                 heatmap_data = pd.crosstab(df['process'], df['remote_port'])
                 if not heatmap_data.empty:
@@ -711,7 +693,6 @@ class NetworkConnectionAnalyzer:
             else:
                 axes_security[0, 1].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
-            # Line chart: Outbound traffic spikes
             if len(df) > 1:
                 df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
                 outbound_spikes = df[df['direction'] == 'Outbound'].groupby(df['datetime'].dt.floor('1Min'))['bytes_sent'].sum()
@@ -726,7 +707,7 @@ class NetworkConnectionAnalyzer:
             else:
                 axes_security[1, 0].text(0.5, 0.5, 'No Data', ha='center', va='center')
             
-            axes_security[1, 1].axis('off')  # Unused subplot
+            axes_security[1, 1].axis('off')  
             
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             visualizations['security'] = fig_security
@@ -743,7 +724,6 @@ class NetworkConnectionAnalyzer:
         duration = df['timestamp'].max() - df['timestamp'].min() if len(df) > 1 else 0
         connection_rate = len(df) / duration if duration > 0 else 0
         
-        # Summarize suspicious connections
         suspicious_connections = df[df['anomaly_score'] == 1][['process', 'remote_ip', 'remote_port', 'bytes_sent', 'duration_seconds']].to_dict(orient='records')
         
         report = {
@@ -780,7 +760,6 @@ class NetworkConnectionAnalyzer:
         insights = []
         
         try:
-            # Existing heuristics
             outbound_count = len(df[df['direction'] == 'Outbound'])
             total_count = len(df)
             if total_count > 0 and (outbound_count / total_count > 0.7):
@@ -812,32 +791,26 @@ class NetworkConnectionAnalyzer:
             if analysis['traffic_spikes']:
                 insights.append(f"Traffic spikes detected: {len(analysis['traffic_spikes'])} connections with unusual activity.")
             
-            # New threat heuristics
-            # Port scanning behavior
             port_scan = df.groupby('process')['remote_port'].nunique()
             port_scan_processes = port_scan[port_scan > 10].index.tolist()
             if port_scan_processes:
                 insights.append(f"Potential port scanning by processes: {', '.join(port_scan_processes)} - contacting multiple ports (>10).")
             
-            # Data exfiltration
             if len(df) > 1:
                 df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
                 outbound_traffic = df[df['direction'] == 'Outbound'].groupby(df['datetime'].dt.floor('1Min'))['bytes_sent'].sum()
-                if not outbound_traffic.empty and outbound_traffic.max() > 5000:  # Threshold: 5000 bytes/min
+                if not outbound_traffic.empty and outbound_traffic.max() > 5000:  
                     insights.append(f"High outbound traffic detected: {outbound_traffic.max()} bytes/min - possible data exfiltration.")
             
-            # Unusual local ports
             unusual_local_ports = df[(df['local_port'] < 1024) & (df['local_port'] != 0)]['local_port'].nunique()
             if unusual_local_ports > 5:
                 insights.append(f"Unusual local port usage: {unusual_local_ports} unique ports <1024 - check for privilege escalation.")
             
-            # Multiple simultaneous connections
             simultaneous_conns = df.groupby(['process', 'remote_ip']).size()
             high_simultaneous = simultaneous_conns[simultaneous_conns > 5].index.tolist()
             if high_simultaneous:
                 insights.append(f"Multiple simultaneous connections from: {', '.join([f'{p} to {ip}' for p, ip in high_simultaneous])} - potential botnet activity.")
             
-            # ML-based anomalies
             if 'anomaly_score' in df.columns:
                 anomalous_count = len(df[df['anomaly_score'] == 1])
                 if anomalous_count > 0:
