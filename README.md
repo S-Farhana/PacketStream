@@ -57,4 +57,10 @@ source venv/bin/activate          # Linux / macOS
 # Install dependencies
 pip install streamlit psutil pandas numpy matplotlib seaborn altair scikit-learn pillow requests
 
+## Run the Application
+
+```bash
+streamlit run app.py
+
+
 
